@@ -18,7 +18,7 @@ import { startResultPoll, type ResultPollHandle } from "../quadra/resultPoll.js"
 import { getWalletBalances } from "../wallet/walletInfo.js";
 import { faucetSupported, requestGas } from "../wallet/faucet.js";
 import { conversationIdFor } from "../util/conversationId.js";
-import { formatQuadra, shortAddress } from "../util/formatSui.js";
+import { formatQuadra } from "../util/formatSui.js";
 import { StatusHeader } from "./components/StatusHeader.js";
 import { Prompt } from "./components/Prompt.js";
 import { useInputRequest } from "./console/useInputRequest.js";
@@ -28,7 +28,6 @@ import type { CliConfig } from "../config/config.js";
 import type { UnlockedWallet } from "../keystore/keystoreTypes.js";
 import type { JobResult, RankedAgentRow } from "../quadra/gatewayTypes.js";
 
-const APP_VERSION = "0.1.0";
 const RENDER_TAIL = 300;
 
 const COMMANDS = new Set([
@@ -39,6 +38,8 @@ const COMMANDS = new Set([
   "browse",
   "connect",
   "pay",
+  "result",
+  "retry",
   "leave",
   "back",
   "status",
@@ -159,7 +160,7 @@ export function Console({ services }: { services: Services }) {
       line(
         `  Wallet    ${
           walletRef.current
-            ? `${walletRef.current.name} ${shortAddress(walletRef.current.address)}`
+            ? `${walletRef.current.name}  ${walletRef.current.address}`
             : 'none — run "wallet new"'
         }`,
         { color: walletRef.current ? "green" : "yellow" },
@@ -234,6 +235,9 @@ export function Console({ services }: { services: Services }) {
         return connectFlow(args.join(" "));
       case "pay":
         return payFlow();
+      case "result":
+      case "retry":
+        return retryResult();
       case "leave":
       case "back":
         return leaveAgent();
@@ -262,6 +266,7 @@ export function Console({ services }: { services: Services }) {
       line("  agents                               list available agents", { color: "gray" }),
       line("  connect <name>                       chat with a named agent (e.g. connect EthPriceBandAgent)", { color: "gray" }),
       line("  pay                                  pay for the job the agent just scoped", { color: "gray" }),
+      line("  result                               re-fetch the last paid result (no re-pay)", { color: "gray" }),
       line("  leave                                stop chatting with an agent (go back)", { color: "gray" }),
       line("  wallet [new|import|unlock|list|lock] manage wallets", { color: "gray" }),
       line("  settings                             set your OpenAI API key + model", { color: "gray" }),
@@ -302,15 +307,20 @@ export function Console({ services }: { services: Services }) {
     if (sub === "unlock") return walletUnlock();
     if (sub === "list") {
       const l = services.keystore.list();
-      if (l.length === 0) push("no wallets — run \"wallet new\"", { color: "gray" });
-      else
+      if (l.length === 0) push('no wallets — run "wallet new"', { color: "gray" });
+      else {
+        push("Wallets (● = currently unlocked):", { color: "cyan", bold: true });
         pushAll(
-          l.map((w) =>
-            line(`  ${w.name.padEnd(16)} ${shortAddress(w.address)}  ${w.protected ? "(password)" : "(auto)"}`, {
-              color: "gray",
-            }),
-          ),
+          l.map((w) => {
+            const active = walletRef.current?.name === w.name;
+            const tag = w.protected ? "(password)" : "(auto-unlock)";
+            return line(
+              `${active ? "●" : " "} ${w.name.padEnd(16)} ${w.address}  ${tag}${active ? "   <- current" : ""}`,
+              { color: active ? "green" : "gray", bold: active },
+            );
+          }),
         );
+      }
       return;
     }
     if (sub === "lock") {
@@ -538,10 +548,16 @@ export function Console({ services }: { services: Services }) {
       return push(`payment failed: ${pay.message}`, { color: "red" });
     }
     push(`Paid · ${pay.digest.slice(0, 16)}…`, { color: "green" });
+    pollForResult(job.job_id, w.signer);
+  }
+
+  // Poll for + decrypt a job's result. Shared by the pay flow and the "result" recovery command.
+  function pollForResult(jobId: string, signer: UnlockedWallet["signer"]): void {
+    pollRef.current?.cancel();
     pollRef.current = startResultPoll({
       config: configRef.current,
-      jobId: job.job_id,
-      signer: w.signer,
+      jobId,
+      signer,
       onPhase: (p, e) =>
         setBusy(p === "decrypting" ? "decrypting result…" : `waiting for delivery… (${Math.floor(e / 1000)}s)`),
       onDone: (result) => {
@@ -556,6 +572,16 @@ export function Console({ services }: { services: Services }) {
     });
   }
 
+  // Re-fetch + decrypt the most recent job WITHOUT paying again (it is already paid + delivered).
+  async function retryResult(): Promise<void> {
+    const job = jobRef.current;
+    if (!job) return push("No recent job to fetch. Pay for a job first.", { color: "yellow" });
+    const w = walletRef.current;
+    if (!w) return push('Unlock the wallet you paid with first: "wallet unlock".', { color: "yellow" });
+    push(`Fetching result for job ${job.job_id.slice(0, 8)}…`, { color: "gray" });
+    pollForResult(job.job_id, w.signer);
+  }
+
   function printResult(result: JobResult): void {
     pushAll([
       line("Result delivered", { color: "green", bold: true }),
@@ -566,14 +592,12 @@ export function Console({ services }: { services: Services }) {
   }
 
   // --- render --------------------------------------------------------------
-  const walletLabel = wallet ? shortAddress(wallet.address) : "locked";
   const visible = lines.length > RENDER_TAIL ? lines.slice(-RENDER_TAIL) : lines;
 
   return (
     <Box flexDirection="column" paddingX={1} paddingTop={1}>
       <StatusHeader
-        version={APP_VERSION}
-        walletLabel={walletLabel}
+        {...(wallet ? { walletName: wallet.name, walletAddress: wallet.address } : {})}
         agents={node?.agents}
         nodeHost={hostOf(config.gatewayUrl)}
         nodeOnline={node?.online}

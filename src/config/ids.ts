@@ -24,11 +24,11 @@ export const DEFAULT_INTAKE_URL = "https://intake.quadra.sh";
 /** Sui network the package is deployed on. */
 export const DEFAULT_NETWORK = "testnet";
 
-// Open-mode testnet Seal key servers (copied from agent/app/src/runtime/config.ts:36-39).
-// Both run in Open mode, so basic testnet decryption needs no API key. With a threshold of
-// 1, decryption works as long as either server is reachable.
+// Independent (open-mode) testnet Seal key server. Decryption actually derives the committee from
+// the ciphertext (see resultDecrypt.ts), so this is only a fallback. The other historical default
+// (0xb012…) is now a V2 "Committee" server the SDK cannot reach without an aggregatorUrl, so it is
+// intentionally excluded — including it breaks decryption even when only one share is needed.
 export const DEFAULT_SEAL_KEY_SERVER_IDS: readonly string[] = [
-  "0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98",
   "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
 ];
 
