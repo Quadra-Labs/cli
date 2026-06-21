@@ -6,7 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { randomUUID } from "node:crypto";
-import { Box, Text, useApp } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 
 import { applySettings, loadSettings, saveSettings } from "../config/settings.js";
 import { buildCatalog, type Catalog } from "../assistant/agentCatalog.js";
@@ -62,6 +62,13 @@ export function Console({ services }: { services: Services }) {
   const { exit } = useApp();
   const { pending, ask, submit } = useInputRequest();
 
+  // Keep ONE always-active input subscription so Ink never tears down raw mode. The bottom prompt's
+  // TextInput is the real capture, but it UNMOUNTS while a busy spinner is shown (Prompt swaps it for
+  // a Spinner); if it were the only `useInput`, Ink would drop raw mode and stdin would stay paused,
+  // freezing the prompt after the first async command. This no-op handler holds raw mode open. Ink
+  // fans every keystroke to all active handlers, so it does not interfere with the TextInput.
+  useInput(() => {});
+
   const [lines, setLines] = useState<OutputLine[]>([]);
   const [wallet, setWalletS] = useState<UnlockedWallet | undefined>(undefined);
   const [config, setConfigS] = useState<CliConfig>(services.config);
@@ -112,10 +119,11 @@ export function Console({ services }: { services: Services }) {
   // --- boot ----------------------------------------------------------------
   useEffect(() => {
     pushAll([
-      line('Type "help" to get started.', { color: "gray" }),
-      line('Tip: set your model and OpenAI API key with the "settings" command.', { color: "gray" }),
+      line("Quadra CLI — hire AI agents for finance & prediction jobs.", { color: "cyan", bold: true }),
+      line('Type a command below (or "help" anytime), or just say what you need.', { color: "gray" }),
       line(""),
     ]);
+    printHelp(); // show every command on startup so users always know what they can do
     const def = services.keystore.getDefault();
     if (def) {
       const sum = services.keystore.list().find((w) => w.name === def);
@@ -223,7 +231,7 @@ export function Console({ services }: { services: Services }) {
       case "browse":
         return listAgents();
       case "connect":
-        return connectFlow(args[0]);
+        return connectFlow(args.join(" "));
       case "pay":
         return payFlow();
       case "leave":
@@ -250,17 +258,18 @@ export function Console({ services }: { services: Services }) {
   function printHelp(): void {
     pushAll([
       line("Commands", { color: "cyan", bold: true }),
-      line("  help                                show this help", { color: "gray" }),
-      line("  settings                            set your OpenAI API key + model", { color: "gray" }),
+      line("  help                                 show this help", { color: "gray" }),
+      line("  agents                               list available agents", { color: "gray" }),
+      line("  connect <name>                       chat with a named agent (e.g. connect EthPriceBandAgent)", { color: "gray" }),
+      line("  pay                                  pay for the job the agent just scoped", { color: "gray" }),
+      line("  leave                                stop chatting with an agent (go back)", { color: "gray" }),
       line("  wallet [new|import|unlock|list|lock] manage wallets", { color: "gray" }),
-      line("  agents                              list available agents", { color: "gray" }),
-      line("  connect [name]                      chat with the recommended / named agent", { color: "gray" }),
-      line("  pay                                 pay for the proposed job", { color: "gray" }),
-      line("  leave                               stop chatting with an agent", { color: "gray" }),
-      line("  clear                               clear the screen", { color: "gray" }),
-      line("  quit                                exit", { color: "gray" }),
+      line("  settings                             set your OpenAI API key + model", { color: "gray" }),
+      line("  status                               show API key / wallet / node + agents", { color: "gray" }),
+      line("  clear                                clear the screen", { color: "gray" }),
+      line("  quit                                 exit", { color: "gray" }),
       line(""),
-      line("Or just type what you need — the assistant will find the right agent.", { color: "gray" }),
+      line("Or just type what you need in plain English — the assistant finds the right agent.", { color: "gray" }),
       line(""),
     ]);
   }
@@ -417,12 +426,25 @@ export function Console({ services }: { services: Services }) {
 
   async function connectFlow(arg: string | undefined): Promise<void> {
     const agents = catalogRef.current?.agents ?? [];
-    const target = arg
-      ? agents.find(
-          (a) => a.name.toLowerCase() === arg.toLowerCase() || `#${a.rank}` === arg || a.wallet === arg,
-        )
+    const raw = arg?.trim();
+    const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+    // `connect <name>` resolves a NAMED agent directly — no recommendation required: match by
+    // wallet, "#rank", the name ignoring case/spaces/punctuation ("eth price band agent" ->
+    // EthPriceBandAgent), then a loose contains. Bare `connect` falls back to the last recommended.
+    const q = raw ? norm(raw) : "";
+    const target = raw
+      ? (agents.find((a) => a.wallet === raw || `#${a.rank}` === raw) ??
+        agents.find((a) => norm(a.name) === q) ??
+        agents.find((a) => norm(a.name).includes(q) || q.includes(norm(a.name))))
       : recRef.current;
-    if (!target) return push('Nothing to connect to. Ask the assistant, or run "agents".', { color: "yellow" });
+    if (!target) {
+      return push(
+        raw
+          ? `No agent matches "${raw}". Run "agents" to see the exact names.`
+          : 'Nothing to connect to. Run "agents", then "connect <name>".',
+        { color: "yellow" },
+      );
+    }
     setBusy(`connecting to ${target.name}…`);
     const ep = await getAgentEndpoint(configRef.current, target.wallet);
     if (!ep.ok || !ep.data) {
